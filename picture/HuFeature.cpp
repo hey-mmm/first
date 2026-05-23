@@ -1,44 +1,29 @@
-
 #include "HuFeature.h"
-#include <opencv2/imgproc.hpp>
+#include "utils.h"
 #include <cmath>
 #include <iostream>
-#include <stdexcept>
-#include "Per_Size.h"
 
-
-
-
-void getcommonHuMoments(const Mat& src, double hu[7])
+// ─────────────────────────────────────────────
+//  私有：原始 Hu 矩计算（含预处理）
+// ─────────────────────────────────────────────
+void CHuFeatureExtractor::computeRawHu(const cv::Mat &src, double hu[7]) const
 {
-    // 预处理
-    Mat processed=preprocessChar(src);
-
-    Moments mo = moments(processed, true);
-
-    double huRaw[7] = { 0 };
-    HuMoments(mo, huRaw);
-
-    for (int i = 0; i < 7; i++)
-    {
-        hu[i] = huRaw[i];
-    }
+    CV_Assert(!src.empty());
+    cv::Mat processed = preprocessChar(src);
+    cv::Moments mo = cv::moments(processed, true);
+    cv::HuMoments(mo, hu);
 }
 
-
-
-void getLogHuMoments(const Mat& src, double logHu[7])
+// ─────────────────────────────────────────────
+//  私有：log 变换
+// ─────────────────────────────────────────────
+void CHuFeatureExtractor::applyLogTransform(const double hu[7], double logHu[7]) const
 {
-    double hu[7] = { 0 };
-    getcommonHuMoments(src, hu);
-
     for (int i = 0; i < 7; i++)
     {
         double absVal = std::fabs(hu[i]);
-
         if (absVal < 1e-30)
         {
-            // 值极小，视为0，避免log溢出
             logHu[i] = 0.0;
         }
         else
@@ -49,12 +34,111 @@ void getLogHuMoments(const Mat& src, double logHu[7])
     }
 }
 
+// ─────────────────────────────────────────────
+//  私有：z-score 归一化
+// ─────────────────────────────────────────────
+std::vector<double> CHuFeatureExtractor::zScoreNormalize(const double logHu[7]) const
+{
+    std::vector<double> feat(7);
+    for (int k = 0; k < 7; k++)
+    {
+        double m = m_huMean.at<double>(0, k);
+        double s = m_huStd.at<double>(0, k);
+        feat[k] = (s > 1e-8) ? (logHu[7] - m) / s : 0.0;
+    }
+    return feat;
+}
 
+// ─────────────────────────────────────────────
+//  训练：学习均值和标准差
+// ─────────────────────────────────────────────
+void CHuFeatureExtractor::trainNormParams(const std::vector<cv::Mat> &trainImgs)
+{
+    CV_Assert(!trainImgs.empty());
 
-void getstandHuMoments(const std::vector<Mat>& charImgs, 
-                  std::vector<std::vector<double>>& features,
-                  const Mat& mean,   // 新增参数：均值行向量 (1×7)
-                  const Mat& std)    // 新增参数：标准差行向量 (1×7)
+    const int n = (int)trainImgs.size();
+    cv::Mat allHu(n, 7, CV_32F); // n×7，每行一个样本
+
+    for (int i = 0; i < n; i++)
+    {
+        if (trainImgs[i].empty())
+        {
+            std::cerr << "[警告] 第 " << i << " 张训练图为空，跳过\n";
+            continue;
+        }
+        double hu[7] = {};
+        computeRawHu(trainImgs[i], hu);
+
+        // 直接存 log 变换后的值，与推理阶段保持一致
+        double logHu[7] = {};
+        applyLogTransform(hu, logHu);
+
+        std::memcpy(allHu.ptr<double>(i), logHu, 7 * sizeof(double));
+    }
+
+    // meanStdDev 输出 7×1 列向量，转置成 1×7 行向量
+    cv::Mat mean, std;
+    cv::meanStdDev(allHu, mean, std);
+    m_huMean = mean.t(); // 1×7
+    m_huStd = std.t();   // 1×7
+
+    m_isTrained = true;
+}
+
+// ─────────────────────────────────────────────
+//  持久化：保存
+// ─────────────────────────────────────────────
+void CHuFeatureExtractor::save(const std::string &filename) const
+{
+    CV_Assert(m_isTrained && "请先 trainNormParams() 再保存");
+    cv::FileStorage fs(filename, cv::FileStorage::WRITE);
+    fs << "huMean" << m_huMean;
+    fs << "huStd" << m_huStd;
+    fs.release();
+}
+
+// ─────────────────────────────────────────────
+//  持久化：加载
+// ─────────────────────────────────────────────
+void CHuFeatureExtractor::load(const std::string &filename)
+{
+    cv::FileStorage fs(filename, cv::FileStorage::READ);
+    CV_Assert(fs.isOpened());
+    fs["huMean"] >> m_huMean;
+    fs["huStd"] >> m_huStd;
+    fs.release();
+    m_isTrained = true;
+}
+
+// ─────────────────────────────────────────────
+//  特征提取：单张图
+// ─────────────────────────────────────────────
+std::vector<double> CHuFeatureExtractor::extractOne(const cv::Mat &src,
+                                                    bool useLog) const
+{
+    double hu[7] = {};
+    computeRawHu(src, hu);
+
+    // 是否做 log 变换
+    double finalHu[7] = {};
+    if (useLog)
+        applyLogTransform(hu, finalHu);
+    else
+        std::memcpy(finalHu, hu, 7 * sizeof(double));
+
+    // 是否做 z-score 归一化
+    if (m_isTrained)
+        return zScoreNormalize(finalHu);
+
+    return std::vector<double>(finalHu, finalHu + 7);
+}
+
+// ─────────────────────────────────────────────
+//  特征提取：批量
+// ─────────────────────────────────────────────
+void CHuFeatureExtractor::extractBatch(const std::vector<cv::Mat> &charImgs,
+                                       std::vector<std::vector<double>> &features,
+                                       bool useLog) const
 {
     features.clear();
     features.reserve(charImgs.size());
@@ -63,25 +147,9 @@ void getstandHuMoments(const std::vector<Mat>& charImgs,
     {
         if (charImgs[i].empty())
         {
-            std::cerr << "[警告] 第 " << i << " 个字符图像为空，跳过" << std::endl;
+            std::cerr << "[警告] 第 " << i << " 个字符图像为空，跳过\n";
             continue;
         }
-
-        double logHu[7] = { 0 };
-        getLogHuMoments(charImgs[i], logHu);
-
-        // ── 新增：对 7 个 Hu 特征做 z-score 标准化 ──────────────────
-        std::vector<double> feat;
-        feat.reserve(7);
-        for (int k = 0; k < 7; ++k)
-        {
-            double m = mean.at<double>(0, k);
-            double s = std.at<double>(0, k);
-            double z = (s > 1e-8) ? (logHu[k] - m) / s : 0.0;
-            feat.push_back(z);
-        }
-        // ─────────────────────────────────────────────────────────────
-
-        features.push_back(std::move(feat));
+        features.push_back(extractOne(charImgs[i], useLog));
     }
 }
