@@ -8,3 +8,4 @@ void getHogMoments(const std::vector<cv::Mat> &charImgs,
                    std::vector<std::vector<double>> &features);
 
 
+

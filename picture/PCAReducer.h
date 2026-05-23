@@ -1,35 +1,35 @@
 #pragma once
 #include <opencv2/opencv.hpp>
-#include <vector>
 #include <string>
 
-/**
- * 对联合特征做 PCA 降维。
- * - fit: 用训练集学出投影矩阵
- * - project: 把任意特征投到低维空间
- * - save/load: 模型持久化
- */
 class CPCAReducer
 {
 public:
-    CPCAReducer();
+    CPCAReducer() = default;
 
-    // 训练
-    void fit(const cv::Mat& outMat,
-             int dims = 90, double retainedVariance = 0.97);
+    // ===== 训练接口 =====
+    // 二选一：dims>0 用固定维度；否则用 retainedVariance（0~1）
+    void fit(const cv::Mat &data,
+             int dims = 0,
+             double retainedVariance = 0.95);
 
-    void project(const std::vector<std::vector<double>>& features,
-                 std::vector<std::vector<double>>& reduced) const;
+    // ===== 使用接口 =====
+    // 把高维数据投影到低维（必须先 fit 或 load）
+    cv::Mat transform(const cv::Mat &data) const;
 
-    void projectOne(const std::vector<double>& feat,
-                    std::vector<double>& reduced) const;
+    // 反投影：低维 → 高维（用于重建可视化）
+    cv::Mat inverseTransform(const cv::Mat &lowDimData) const;
 
-    bool save(const std::string& file) const;
-    bool load(const std::string& file);
+    // ===== 持久化接口 =====
+    void save(const std::string &filename) const;
+    void load(const std::string &filename);
 
-    bool isFitted() const { return !m_pca.eigenvectors.empty(); }
-    int  outDim() const { return m_pca.eigenvectors.rows; }
+    // ===== 查询接口 =====
+    bool isFitted() const { return m_isFitted; }
+    int getDims() const { return m_isFitted ? m_pca.eigenvalues.rows : 0; }
+    cv::Mat getMean() const { return m_pca.mean; }
 
 private:
     cv::PCA m_pca;
+    bool m_isFitted = false;
 };
